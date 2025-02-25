@@ -54,4 +54,65 @@ def compare_with_references(uploaded_img):
     for lang, ref_path in real_sample_paths.items():
         if os.path.exists(ref_path):
             reference_img = cv2.imread(ref_path, cv2.IMREAD_GRAYSCALE)
-            if uploaded_img
+            uploaded_gray = cv2.cvtColor(uploaded_img, cv2.COLOR_BGR2GRAY)
+
+            # Resize the uploaded image to match the reference size
+            reference_resized = cv2.resize(reference_img, (uploaded_gray.shape[1], uploaded_gray.shape[0]))
+
+            # Compute SSIM
+            score, _ = ssim(reference_resized, uploaded_gray, full=True)
+            
+            if score > best_score:
+                best_score = score
+                best_match = lang
+
+    return best_match, best_score
+
+@app.route('/upload', methods=['POST'])
+def upload_file():
+    """ Handles image uploads and fraud detection. """
+    if 'file' not in request.files:
+        return jsonify({"error": "No file uploaded"}), 400
+
+    file = request.files['file']
+    if file.filename == '':
+        return jsonify({"error": "No selected file"}), 400
+
+    # Save uploaded image
+    file_path = os.path.join(UPLOAD_FOLDER, file.filename)
+    file.save(file_path)
+
+    # Read image
+    uploaded_img = cv2.imread(file_path)
+    if uploaded_img is None:
+        return jsonify({"error": "Invalid image file"}), 400
+
+    # Check for Photoshop edits
+    photoshop_detected = detect_photoshop_edit(file_path)
+
+    # Compare with reference samples
+    best_match, ssim_score = compare_with_references(uploaded_img)
+
+    # Classification based on SSIM score
+    if ssim_score >= SSIM_THRESHOLD_REAL:
+        classification = "Real"
+    elif ssim_score < SSIM_NOT_RECEIPT:
+        classification = "Not a Receipt"
+    elif ssim_score < SSIM_THRESHOLD_FAKE:
+        classification = "Fake"
+    else:
+        classification = "Probably Fake"
+
+    # Construct response
+    response = {
+        "file": file.filename,
+        "classification": classification,
+        "similarity_score": round(ssim_score, 4),
+        "reference_matched": best_match,
+        "photoshop_detected": photoshop_detected
+    }
+
+    return jsonify(response), 200
+
+if __name__ == '__main__':
+    app.run(host='0.0.0.0', port=8000, debug=True)
