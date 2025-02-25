@@ -1,6 +1,1 @@
-flask
-flask-cors
-opencv-python
-numpy
-pillow
-scikit-image
+web: gunicorn -w 4 -b 0.0.0.0:8000 fraud_detection:app
