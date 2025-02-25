@@ -54,65 +54,68 @@ def compare_with_references(uploaded_img):
     for lang, ref_path in real_sample_paths.items():
         if os.path.exists(ref_path):
             reference_img = cv2.imread(ref_path, cv2.IMREAD_GRAYSCALE)
-            uploaded_gray = cv2.cvtColor(uploaded_img, cv2.COLOR_BGR2GRAY)
-
-            # Resize the uploaded image to match the reference size
-            reference_resized = cv2.resize(reference_img, (uploaded_gray.shape[1], uploaded_gray.shape[0]))
-
-            # Compute SSIM
-            score, _ = ssim(reference_resized, uploaded_gray, full=True)
             
-            if score > best_score:
-                best_score = score
-                best_match = lang
+            if uploaded_img is not None and reference_img is not None:
+                # Resize to match reference image
+                uploaded_resized = cv2.resize(uploaded_img, (reference_img.shape[1], reference_img.shape[0]))
+
+                # Compute Structural Similarity Index (SSIM)
+                score = ssim(uploaded_resized, reference_img)
+
+                if score > best_score:
+                    best_score = score
+                    best_match = lang
 
     return best_match, best_score
 
-@app.route('/upload', methods=['POST'])
-def upload_file():
-    """ Handles image uploads and fraud detection. """
-    if 'file' not in request.files:
-        return jsonify({"error": "No file uploaded"}), 400
+@app.route('/detect', methods=['POST'])
+def detect_fraud():
+    """ Endpoint to check if an uploaded receipt is real or fake. """
+    try:
+        if 'file' not in request.files:
+            return jsonify({"error": "No file provided"}), 400
+        
+        file = request.files['file']
+        if file.filename == '':
+            return jsonify({"error": "No selected file"}), 400
+        
+        file_path = os.path.join(UPLOAD_FOLDER, file.filename)
+        file.save(file_path)
 
-    file = request.files['file']
-    if file.filename == '':
-        return jsonify({"error": "No selected file"}), 400
+        # Load the uploaded image
+        uploaded_img = cv2.imread(file_path, cv2.IMREAD_GRAYSCALE)
 
-    # Save uploaded image
-    file_path = os.path.join(UPLOAD_FOLDER, file.filename)
-    file.save(file_path)
+        if uploaded_img is None:
+            return jsonify({"error": "Invalid image format"}), 400
 
-    # Read image
-    uploaded_img = cv2.imread(file_path)
-    if uploaded_img is None:
-        return jsonify({"error": "Invalid image file"}), 400
+        # Detect Photoshop Editing
+        photoshop_detected = detect_photoshop_edit(file_path)
 
-    # Check for Photoshop edits
-    photoshop_detected = detect_photoshop_edit(file_path)
+        # Compare with Reference Images
+        best_match, ssim_score = compare_with_references(uploaded_img)
 
-    # Compare with reference samples
-    best_match, ssim_score = compare_with_references(uploaded_img)
+        # Classification Logic
+        if ssim_score >= SSIM_THRESHOLD_REAL:
+            result = "Real"
+            confidence = f"{ssim_score * 100:.2f}%"
+        elif ssim_score < SSIM_NOT_RECEIPT:
+            result = "Not a Payment Screenshot"
+            confidence = "0%"
+        else:
+            result = "Probably Fake" if photoshop_detected else "Fake"
+            confidence = f"{(1 - ssim_score) * 100:.2f}%"
 
-    # Classification based on SSIM score
-    if ssim_score >= SSIM_THRESHOLD_REAL:
-        classification = "Real"
-    elif ssim_score < SSIM_NOT_RECEIPT:
-        classification = "Not a Receipt"
-    elif ssim_score < SSIM_THRESHOLD_FAKE:
-        classification = "Fake"
-    else:
-        classification = "Probably Fake"
+        # Return JSON Response
+        return jsonify({
+            "result": result,
+            "ssim_score": f"{ssim_score:.4f}",
+            "confidence": confidence,
+            "photoshop_detected": photoshop_detected
+        })
 
-    # Construct response
-    response = {
-        "file": file.filename,
-        "classification": classification,
-        "similarity_score": round(ssim_score, 4),
-        "reference_matched": best_match,
-        "photoshop_detected": photoshop_detected
-    }
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
-    return jsonify(response), 200
-
+# Run Flask App
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=8000, debug=True)
