@@ -1,18 +1,16 @@
-from flask import Flask, request, jsonify
+from flask import Flask, request, jsonify, render_template
 import cv2
 import numpy as np
 from skimage.metrics import structural_similarity as ssim
 from PIL import Image, ExifTags
 import os
-from flask_cors import CORS  # Allow cross-origin requests
 
 # Initialize Flask App
 app = Flask(__name__)
-CORS(app)  # Enable CORS for all routes
 
-# Folder Paths
+# Corrected Folder Paths
 UPLOAD_FOLDER = 'uploads'
-REAL_SAMPLE_FOLDER = 'real_samples'
+REAL_SAMPLE_FOLDER = r"C:\Users\lenovo\Desktop\background.programes\2025\real_samples"  # Corrected path
 
 # Ensure folders exist
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
@@ -37,85 +35,147 @@ def detect_photoshop_edit(image_path):
     try:
         img = Image.open(image_path)
         exif_data = img._getexif()
+
         if exif_data:
             for tag, value in exif_data.items():
                 tag_name = ExifTags.TAGS.get(tag, tag)
                 if tag_name == "Software" and any(app in str(value) for app in ["Photoshop", "GIMP", "Pixelmator", "Snapseed"]):
-                    return True  # Photoshop detected
+                    return True  # Photoshop or similar app detected
     except Exception:
-        pass
-    return False  # No editing software detected
+        pass  # Ignore errors when reading metadata
+
+    return False  # No editing app detected
 
 def compare_with_references(uploaded_img):
-    """ Compares uploaded image with French & Arabic reference images to select best match. """
+    """ Compares the uploaded image with both French and Arabic reference images and selects the best match. """
     best_match = None
     best_score = 0
 
     for lang, ref_path in real_sample_paths.items():
         if os.path.exists(ref_path):
             reference_img = cv2.imread(ref_path, cv2.IMREAD_GRAYSCALE)
-            
-            if uploaded_img is not None and reference_img is not None:
-                # Resize to match reference image
-                uploaded_resized = cv2.resize(uploaded_img, (reference_img.shape[1], reference_img.shape[0]))
-
-                # Compute Structural Similarity Index (SSIM)
-                score = ssim(uploaded_resized, reference_img)
-
-                if score > best_score:
-                    best_score = score
-                    best_match = lang
+            if uploaded_img.shape != reference_img.shape:
+                reference_img = cv2.resize(reference_img, (uploaded_img.shape[1], uploaded_img.shape[0]))
+            score, _ = ssim(uploaded_img, reference_img, full=True)
+            if score > best_score:
+                best_match = lang
+                best_score = score
 
     return best_match, best_score
 
-@app.route('/detect', methods=['POST'])
-def detect_fraud():
-    """ Endpoint to check if an uploaded receipt is real or fake. """
+@app.route('/')
+def index():
+    return '''
+    <!DOCTYPE html>
+    <html lang="en">
+    <head>
+        <meta charset="UTF-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <title>Fraud Detection</title>
+    </head>
+    <body>
+        <h2>Upload Screenshot for Fraud Detection</h2>
+        <form id="fraudDetectionForm" enctype="multipart/form-data">
+            <input type="file" id="fileInput" name="file" required>
+            <button type="submit">Verify</button>
+        </form>
+        <div id="result"></div>
+
+        <script>
+            document.getElementById("fraudDetectionForm").onsubmit = async function(event) {
+                event.preventDefault();
+                let formData = new FormData();
+                let fileInput = document.getElementById("fileInput").files[0];
+
+                if (!fileInput) {
+                    document.getElementById("result").innerHTML = "<p>Please select a file.</p>";
+                    return;
+                }
+
+                formData.append("file", fileInput);
+                let response = await fetch("/upload", { method: "POST", body: formData });
+                let result = await response.json();
+                
+                document.getElementById("result").innerHTML = `
+                    <p>Classification: <b style="color:${result.color};">${result.classification}</b></p>
+                    <p>SSIM Score: ${result.ssim_score}</p>
+                    ${result.fake_reason ? `<p>Reason: ${result.fake_reason.join("<br>")}</p>` : ""}
+                `;
+            };
+        </script>
+    </body>
+    </html>
+    '''
+
+@app.route('/upload', methods=['POST'])
+def upload_file():
+    if 'file' not in request.files:
+        return jsonify({'error': 'No file uploaded'}), 400
+
+    file = request.files['file']
+    if file.filename == '':
+        return jsonify({'error': 'No file selected'}), 400
+
+    file_path = os.path.join(UPLOAD_FOLDER, file.filename)
+    file.save(file_path)
+
     try:
-        if 'file' not in request.files:
-            return jsonify({"error": "No file provided"}), 400
-        
-        file = request.files['file']
-        if file.filename == '':
-            return jsonify({"error": "No selected file"}), 400
-        
-        file_path = os.path.join(UPLOAD_FOLDER, file.filename)
-        file.save(file_path)
-
-        # Load the uploaded image
+        # Load uploaded image
         uploaded_img = cv2.imread(file_path, cv2.IMREAD_GRAYSCALE)
-
         if uploaded_img is None:
-            return jsonify({"error": "Invalid image format"}), 400
+            return jsonify({
+                'classification': "Not a Payment Screenshot ❌",
+                'color': 'black',
+                'fake_reason': ["Uploaded image is not a valid receipt."]
+            })
 
-        # Detect Photoshop Editing
-        photoshop_detected = detect_photoshop_edit(file_path)
+        # Compare with reference images
+        best_match, best_ssim = compare_with_references(uploaded_img)
 
-        # Compare with Reference Images
-        best_match, ssim_score = compare_with_references(uploaded_img)
+        if not best_match:
+            return jsonify({
+                'classification': "Not a Payment Screenshot ❌",
+                'color': 'black',
+                'fake_reason': ["Uploaded image does not match any known receipt format."]
+            })
+
+        # Detect Photoshop or similar editing
+        is_edited = detect_photoshop_edit(file_path)
+        classification = "Real ✅"
+        color = "green"
+        fake_reason = []
+        show_probability = False
+        probability = 0
 
         # Classification Logic
-        if ssim_score >= SSIM_THRESHOLD_REAL:
-            result = "Real"
-            confidence = f"{ssim_score * 100:.2f}%"
-        elif ssim_score < SSIM_NOT_RECEIPT:
-            result = "Not a Payment Screenshot"
-            confidence = "0%"
+        if is_edited:
+            classification = "Fake 🔴"
+            color = "red"
+            fake_reason.append("Metadata shows the image was edited in Photoshop or similar software.")
+        elif best_ssim >= SSIM_THRESHOLD_REAL:
+            classification = "Real ✅"
+            color = "green"
+        elif best_ssim >= SSIM_THRESHOLD_FAKE:
+            classification = "Probably Fake ⚠️"
+            color = "orange"
+            show_probability = True
+            probability = round((1 - best_ssim) * 100, 2)  # Convert SSIM into fake probability
+            fake_reason.append(f"Image appears modified. Probability of being fake: {probability}%")
         else:
-            result = "Probably Fake" if photoshop_detected else "Fake"
-            confidence = f"{(1 - ssim_score) * 100:.2f}%"
+            classification = "Fake 🔴"
+            color = "red"
+            fake_reason.append(f"Very low similarity score: {best_ssim:.4f}. Image does not match reference.")
 
-        # Return JSON Response
         return jsonify({
-            "result": result,
-            "ssim_score": f"{ssim_score:.4f}",
-            "confidence": confidence,
-            "photoshop_detected": photoshop_detected
+            'classification': classification,
+            'color': color,
+            'fake_reason': fake_reason if classification != "Real ✅" else [],
+            'show_probability': show_probability,
+            'probability': probability if show_probability else None
         })
 
     except Exception as e:
-        return jsonify({"error": str(e)}), 500
+        return jsonify({'error': str(e)}), 500
 
-# Run Flask App
 if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=8000, debug=True)
+    app.run(host="0.0.0.0", port=5000, debug=True)  # Run on all networks
