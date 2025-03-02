@@ -169,6 +169,7 @@ def upload_file():
         return jsonify({
             'classification': classification,
             'color': color,
+            'ssim_score': best_ssim,
             'fake_reason': fake_reason if classification != "Real ✅" else [],
             'show_probability': show_probability,
             'probability': probability if show_probability else None
